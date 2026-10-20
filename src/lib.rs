@@ -271,13 +271,17 @@ impl StreamDeck {
         let _ = self.orders.try_send(StreamDeckOrder::Color(key, color));
     }
 
+    /// Returns `true` if the update was queued, `false` if there is no deck
+    /// yet or the queue was full and the update was dropped. Callers that keep
+    /// their own copy of what is on the deck need this to stay in sync.
     #[cfg(feature = "images")]
-    pub fn set_key_image(&self, key: u8, image: &Image) {
+    pub fn set_key_image(&self, key: u8, image: &Image) -> bool {
         self.set_key_image_with_mode(key, image, ImageMode::default())
     }
 
+    /// See [`StreamDeck::set_key_image`] for the return value.
     #[cfg(feature = "images")]
-    pub fn set_key_image_with_mode(&self, key: u8, image: &Image, image_mode: ImageMode) {
+    pub fn set_key_image_with_mode(&self, key: u8, image: &Image, image_mode: ImageMode) -> bool {
         if let Some(kind) = self.kind {
             // Convert the texture to an image
             let mut dynamic_image = match image.texture_descriptor.format {
@@ -328,9 +332,11 @@ impl StreamDeck {
                 dynamic_image.invert();
             }
 
-            let _ = self
-                .orders
-                .try_send(StreamDeckOrder::Image(key, dynamic_image));
+            self.orders
+                .try_send(StreamDeckOrder::Image(key, dynamic_image))
+                .is_ok()
+        } else {
+            false
         }
     }
 
