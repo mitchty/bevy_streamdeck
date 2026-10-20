@@ -15,8 +15,22 @@ This is a plugin for integrating the [Elgato Stream Deck](https://www.elgato.com
 ### Adding the Plugin
 
 ```rust
-app.add_plugin(StreamDeckPlugin);
+app.add_plugins(StreamDeckPlugin::default());
 ```
+
+By default the first Elgato Stream Deck found is used. To pick a specific one,
+filter by kind, USB product id, and/or serial:
+
+```rust
+app.add_plugins(
+    StreamDeckPlugin::default()
+        .with_kind(Kind::Xl)
+        .with_pid(0x008f)
+        .with_serial("A00..."),
+);
+```
+
+Keys are zero indexed everywhere, left to right then top to bottom.
 
 ### Handling Input Events
 
@@ -36,7 +50,7 @@ Set a button color (see [colors example](https://github.com/vleue/bevy_streamdec
 
 ```rust
 fn set_color(streamdeck: Res<StreamDeck>) {
-    streamdeck.set_key_color(1, Color::BLUE);
+    streamdeck.set_key_color(0, Color::BLUE);
 }
 
 ```
@@ -49,7 +63,7 @@ Display an image on a button (see [image example](https://github.com/vleue/bevy_
 fn set_image(streamdeck: Res<StreamDeck>, logo: Res<Logo>, images: Res<Assets<Image>>) {
     let handle: Handle<Image> = ...;
     if let Some(image) = images.get(&handle) {
-        streamdeck.set_key_image(1, &image);
+        streamdeck.set_key_image(0, &image);
     }
 }
 ```

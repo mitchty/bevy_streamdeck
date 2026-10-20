@@ -14,7 +14,7 @@ fn main() {
             ImagePlugin::default(),
             LogPlugin::default(),
         ))
-        .add_plugins(StreamDeckPlugin)
+        .add_plugins(StreamDeckPlugin::default())
         .add_systems(Startup, load_asset)
         .add_systems(
             Update,

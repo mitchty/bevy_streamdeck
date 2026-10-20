@@ -10,7 +10,7 @@ const FACTOR: f64 = 1.0;
 fn main() {
     App::new()
         .add_plugins((MinimalPlugins, LogPlugin::default()))
-        .add_plugins(StreamDeckPlugin)
+        .add_plugins(StreamDeckPlugin::default())
         .add_systems(Startup, clean)
         .insert_resource(Time::<Fixed>::from_hz(1.0 / FACTOR))
         .add_systems(FixedUpdate, spawn_mole)

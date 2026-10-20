@@ -9,7 +9,7 @@ fn main() {
             ImagePlugin::default(),
             LogPlugin::default(),
         ))
-        .add_plugins(StreamDeckPlugin)
+        .add_plugins(StreamDeckPlugin::default())
         .insert_resource(Time::<Fixed>::from_seconds(0.075))
         .add_systems(Startup, load_asset)
         .add_systems(FixedUpdate, change_image)

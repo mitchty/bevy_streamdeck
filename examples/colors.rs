@@ -5,7 +5,7 @@ use rand::RngExt;
 fn main() {
     App::new()
         .add_plugins((MinimalPlugins, LogPlugin::default()))
-        .add_plugins(StreamDeckPlugin)
+        .add_plugins(StreamDeckPlugin::default())
         .insert_resource(Time::<Fixed>::from_seconds(0.5))
         .add_systems(FixedUpdate, change_color)
         .run();

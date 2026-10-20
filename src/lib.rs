@@ -18,15 +18,62 @@ use log::debug;
 pub use streamdeck::Kind;
 use streamdeck::{Colour, Error};
 
-pub struct StreamDeckPlugin;
+/// Which deck to connect to, by default the first Elgato device found.
+///
+/// All the filters are optional and combine, a deck has to match every one
+/// that is set. Only Elgato (vendor `0x0fd9`) devices are looked at.
+#[derive(Default, Clone, Debug)]
+pub struct StreamDeckPlugin {
+    /// Only connect to this kind of deck, e.g. [`Kind::Xl`].
+    pub kind: Option<Kind>,
+    /// USB product id, e.g. `0x008f` for a Stream Deck XL v2.
+    pub pid: Option<u16>,
+    /// USB serial, to pick between several decks of the same kind.
+    pub serial: Option<String>,
+}
+
+impl StreamDeckPlugin {
+    pub fn with_kind(mut self, kind: Kind) -> Self {
+        self.kind = Some(kind);
+        self
+    }
+
+    pub fn with_pid(mut self, pid: u16) -> Self {
+        self.pid = Some(pid);
+        self
+    }
+
+    pub fn with_serial(mut self, serial: impl Into<String>) -> Self {
+        self.serial = Some(serial.into());
+        self
+    }
+}
+
+#[derive(Resource, Clone)]
+struct Target {
+    kind: Option<Kind>,
+    pid: Option<u16>,
+    serial: Option<String>,
+}
+
+impl Target {
+    fn wants(&self, kind: Kind) -> bool {
+        self.kind.is_none_or(|wanted| wanted == kind)
+    }
+}
 
 impl Plugin for StreamDeckPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<StreamDeckInput>()
-            .init_resource::<ButtonInput<StreamDeckKey>>()
-            .add_systems(PreStartup, listener)
-            .add_systems(PreUpdate, receiver)
-            .add_systems(Last, exit_on_exit);
+        app.insert_resource(Target {
+            kind: self.kind,
+            pid: self.pid,
+            serial: self.serial.clone(),
+        })
+        .add_message::<StreamDeckInput>()
+        .init_resource::<ButtonInput<StreamDeckKey>>()
+        .add_systems(PreStartup, listener)
+        .add_systems(PreUpdate, receiver)
+        .add_systems(Last, exit_on_exit);
     }
 }
 
@@ -56,7 +103,28 @@ enum StreamDeckOrder {
     Exit,
 }
 
-fn listener(mut commands: Commands) {
+const ELGATO_VID: u16 = 0x0fd9;
+
+fn connect(target: &Target) -> Option<streamdeck::StreamDeck> {
+    let open = |pid| {
+        streamdeck::StreamDeck::connect(ELGATO_VID, pid, target.serial.clone())
+            .ok()
+            .filter(|deck| target.wants(deck.kind()))
+    };
+    match target.pid {
+        Some(pid) => open(pid),
+        // Probing first means a kind filter never opens decks it doesn't want.
+        None => streamdeck::StreamDeck::probe()
+            .ok()?
+            .into_iter()
+            .flatten()
+            .filter(|(kind, _)| target.wants(*kind))
+            .find_map(|(_, pid)| open(pid)),
+    }
+}
+
+fn listener(mut commands: Commands, target: Res<Target>) {
+    let target = Target::clone(&target);
     let (event_tx, event_rx) = bounded::<StreamDeckEvent>(10);
     let (order_tx, order_rx) = bounded::<StreamDeckOrder>(100);
 
@@ -83,9 +151,11 @@ fn listener(mut commands: Commands) {
                             StreamDeckOrder::Exit => return Ok(false),
                             StreamDeckOrder::Reset => streamdeck.reset(),
                             StreamDeckOrder::Color(k, color) => {
-                                let [r, g, b, _] = color.to_linear().to_f32_array();
+                                // The device wants gamma encoded values, linear
+                                // makes everything look dark and muddy.
+                                let [r, g, b, _] = color.to_srgba().to_f32_array();
                                 streamdeck.set_button_rgb(
-                                    k + 1,
+                                    k,
                                     &Colour {
                                         r: (r * 255.0) as u8,
                                         g: (g * 255.0) as u8,
@@ -95,7 +165,7 @@ fn listener(mut commands: Commands) {
                             }
                             #[cfg(feature = "images")]
                             StreamDeckOrder::Image(k, image) => {
-                                streamdeck.set_button_image(k + 1, image)
+                                streamdeck.set_button_image(k, image)
                             }
                         } {
                             Ok(_) => (),
@@ -122,11 +192,15 @@ fn listener(mut commands: Commands) {
             if lost_connection {
                 streamdeck = None;
             }
-            if streamdeck.is_none()
-                && let Ok(new_streamdeck) = streamdeck::StreamDeck::connect(0x0fd9, 0x0063, None)
-            {
-                let _ = event_tx.send(StreamDeckEvent::Connected(new_streamdeck.kind()));
-                streamdeck = Some(new_streamdeck);
+            if streamdeck.is_none() {
+                if let Some(new_streamdeck) = connect(&target) {
+                    let _ = event_tx.send(StreamDeckEvent::Connected(new_streamdeck.kind()));
+                    streamdeck = Some(new_streamdeck);
+                } else {
+                    // Probing opens hidapi each time, don't spin on it while
+                    // no deck is plugged in.
+                    std::thread::sleep(Duration::from_millis(500));
+                }
             }
         }
     });
@@ -183,13 +257,18 @@ pub struct StreamDeck {
     kind: Option<Kind>,
 }
 
+/// Keys everywhere in this api are zero indexed, left to right then top to
+/// bottom, matching [`StreamDeckKey`] and the `Press`/`Release` events.
 impl StreamDeck {
+    /// The connected deck, `None` until one is found.
     pub fn kind(&self) -> Option<Kind> {
         self.kind
     }
 
     pub fn set_key_color(&self, key: u8, color: Color) {
-        let _ = self.orders.send(StreamDeckOrder::Color(key, color));
+        // try_send: a full queue must never block the main thread, a dropped
+        // color update is harmless.
+        let _ = self.orders.try_send(StreamDeckOrder::Color(key, color));
     }
 
     #[cfg(feature = "images")]
@@ -249,12 +328,16 @@ impl StreamDeck {
                 dynamic_image.invert();
             }
 
-            let _ = self.orders.send(StreamDeckOrder::Image(key, dynamic_image));
+            let _ = self
+                .orders
+                .try_send(StreamDeckOrder::Image(key, dynamic_image));
         }
     }
 
     pub fn reset_key(&self, key: u8) {
-        let _ = self.orders.send(StreamDeckOrder::Color(key, Color::BLACK));
+        let _ = self
+            .orders
+            .try_send(StreamDeckOrder::Color(key, Color::BLACK));
     }
 
     pub fn reset(&self) {
