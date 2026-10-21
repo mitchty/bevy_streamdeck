@@ -6,11 +6,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bevy_app::{App, AppExit, Last, Plugin, PreStartup, PreUpdate};
+use bevy_app::{App, AppExit, Last, OnAppExitSystems, Plugin, PreStartup, PreUpdate};
 pub use bevy_color::{Color, ColorToComponents, LinearRgba};
 use bevy_ecs::{
     message::{Message, MessageReader, MessageWriter},
     resource::Resource,
+    schedule::IntoScheduleConfigs,
     system::{Commands, Res, ResMut},
 };
 #[cfg(feature = "image_compatibility")]
@@ -79,7 +80,9 @@ impl Plugin for StreamDeckPlugin {
         .init_resource::<ButtonInput<StreamDeckKey>>()
         .add_systems(PreStartup, listener)
         .add_systems(PreUpdate, receiver)
-        .add_systems(Last, exit_on_exit);
+        // In this set, not plain Last: closing the window sends AppExit from
+        // inside Last, and this set is ordered to run after that.
+        .add_systems(Last, exit_on_exit.in_set(OnAppExitSystems));
     }
 }
 
