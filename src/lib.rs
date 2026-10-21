@@ -1,4 +1,10 @@
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use bevy_app::{App, AppExit, Last, Plugin, PreStartup, PreUpdate};
 pub use bevy_color::{Color, ColorToComponents, LinearRgba};
@@ -100,8 +106,13 @@ enum StreamDeckOrder {
     Color(u8, Color),
     #[cfg(feature = "images")]
     Image(u8, DynamicImage),
-    Exit,
+    /// Reset the deck back to its default, say so on the channel, then stop.
+    Shutdown(Sender<()>),
 }
+
+/// The longest to wait for each step of putting the deck back to its default
+/// on exit, so a stuck deck can't hang the app.
+const SHUTDOWN_WAIT: Duration = Duration::from_millis(500);
 
 const ELGATO_VID: u16 = 0x0fd9;
 
@@ -127,6 +138,8 @@ fn listener(mut commands: Commands, target: Res<Target>) {
     let target = Target::clone(&target);
     let (event_tx, event_rx) = bounded::<StreamDeckEvent>(10);
     let (order_tx, order_rx) = bounded::<StreamDeckOrder>(100);
+    let closing = Arc::new(AtomicBool::new(false));
+    let worker_closing = closing.clone();
 
     let taskpool = IoTaskPool::get();
     let task = taskpool.spawn(async move {
@@ -147,8 +160,21 @@ fn listener(mut commands: Commands, target: Res<Target>) {
                     }
 
                     for order in order_rx.try_iter() {
+                        // Closing, so drawing that is still queued is
+                        // pointless, only get to the shutdown.
+                        if worker_closing.load(Ordering::Relaxed)
+                            && !matches!(order, StreamDeckOrder::Shutdown(_))
+                        {
+                            continue;
+                        }
                         match match order {
-                            StreamDeckOrder::Exit => return Ok(false),
+                            StreamDeckOrder::Shutdown(done) => {
+                                if let Err(error) = streamdeck.reset() {
+                                    debug!("Error resetting StreamDeck on exit: {:?}", error);
+                                }
+                                let _ = done.send(());
+                                return Ok(false);
+                            }
                             StreamDeckOrder::Reset => streamdeck.reset(),
                             StreamDeckOrder::Color(k, color) => {
                                 // The device wants gamma encoded values, linear
@@ -209,6 +235,7 @@ fn listener(mut commands: Commands, target: Res<Target>) {
     commands.insert_resource(StreamDeck {
         orders: order_tx,
         kind: None,
+        closing,
     });
 }
 
@@ -255,6 +282,8 @@ struct StreamDeckInternal {
 pub struct StreamDeck {
     orders: Sender<StreamDeckOrder>,
     kind: Option<Kind>,
+    /// Set on exit so the worker skips drawing that is still queued.
+    closing: Arc<AtomicBool>,
 }
 
 /// Keys everywhere in this api are zero indexed, left to right then top to
@@ -351,10 +380,32 @@ impl StreamDeck {
     }
 }
 
+/// Puts the deck back to its default when the app exits. Waits for the worker to
+/// do it, otherwise the process can be gone before the reset is sent, or it
+/// ends up behind a pile of queued drawing.
 fn exit_on_exit(streamdeck: Res<StreamDeck>, mut exit_events: MessageReader<AppExit>) {
-    if exit_events.read().next().is_some() {
-        let _ = streamdeck.orders.send(StreamDeckOrder::Reset);
-        let _ = streamdeck.orders.send(StreamDeckOrder::Exit);
+    if exit_events.read().next().is_none() {
+        return;
+    }
+    // With no deck connected the worker is only looking for one, so there is
+    // nothing to reset and nobody to answer.
+    if streamdeck.kind.is_none() {
+        return;
+    }
+    let started = Instant::now();
+    streamdeck.closing.store(true, Ordering::Relaxed);
+    let (done_tx, done_rx) = bounded(1);
+    if streamdeck
+        .orders
+        .send_timeout(StreamDeckOrder::Shutdown(done_tx), SHUTDOWN_WAIT)
+        .is_ok()
+    {
+        match done_rx.recv_timeout(SHUTDOWN_WAIT) {
+            Ok(()) => debug!("StreamDeck reset on exit in {:?}", started.elapsed()),
+            Err(_) => debug!("StreamDeck reset on exit timed out"),
+        }
+    } else {
+        debug!("StreamDeck reset on exit not queued, worker is stuck");
     }
 }
 
